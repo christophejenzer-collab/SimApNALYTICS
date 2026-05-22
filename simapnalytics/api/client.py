@@ -194,3 +194,46 @@ class SimapClient:
             n += 1
             if n >= max_results:
                 break
+
+    def find_awards_by_company(
+        self,
+        company_terms: list[str],
+        *,
+        cpv_codes: list[str] | None = None,
+        search: str | None = None,
+        publication_from: str | None = None,
+        publication_until: str | None = None,
+        cantons: list[str] | None = None,
+        project_sub_types: list[str] | None = None,
+        lang: str = "de",
+        scan_limit: int = 2000,
+    ):
+        """Findet Zuschlaege, deren Empfaenger einen der company_terms enthaelt.
+
+        Strategie: serverseitig per CPV/Suche/Zeitraum vorfiltern, Details laden,
+        dann clientseitig nach Firmenname (Teilstring, case-insensitive) filtern.
+
+        company_terms: z.B. ["ricoh"] oder ["canon"]. Match, wenn EIN Term in
+        IRGENDEINEM award_company als Teilstring vorkommt.
+        scan_limit: Obergrenze gescannter Zuschlaege (schuetzt vor Endlos-Last).
+
+        Liefert (Award)-Generator.
+        """
+        terms = [t.lower() for t in company_terms if t.strip()]
+        scanned = 0
+        for award in self.find_awards(
+            search=search,
+            publication_from=publication_from,
+            publication_until=publication_until,
+            cantons=cantons,
+            cpv_codes=cpv_codes,
+            project_sub_types=project_sub_types,
+            lang=lang,
+            max_results=scan_limit,
+        ):
+            scanned += 1
+            hay = " ".join(award.award_companies).lower()
+            if any(t in hay for t in terms):
+                yield award
+            if scanned >= scan_limit:
+                break
