@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+env/
+
+# simap: Token-Cache & lokaler Daten-Cache NIEMALS committen
+.simap_token.json
+*.db
+simap_cache.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

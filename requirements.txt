@@ -1,0 +1,4 @@
+requests>=2.31
+pandas>=2.0
+streamlit>=1.30
+openpyxl>=3.1
