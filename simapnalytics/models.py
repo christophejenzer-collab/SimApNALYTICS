@@ -1,10 +1,13 @@
-"""Datenmodelle und Normalisierung der echten simap-Felder.
+"""Datenmodelle und Normalisierung der ECHTEN simap-v2-Felder.
 
-Award-Felder verifiziert anhand realer API-Antworten:
-  award_companies, award_date, award_price, nr_of_offers,
-  date_project_start, date_project_end, datetime_deadline, datetime_opening.
-Da die v2-Projektsuche und die Detail-Antwort teils andere/zusaetzliche Felder
-liefern, mappen wir defensiv ueber mehrere moegliche Namen.
+Verifiziert anhand realer API-Antworten (Mai 2026):
+- Projektsuche liefert nur Header (mehrsprachige Titel-Objekte, orderAddress).
+- Zuschlagsdaten stehen in der Detail-Antwort unter dem Key "decision":
+    decision.vendors[].vendorName / .price.price   -> Empfaenger + Summe
+    decision.awardDecisionDate                     -> Zuschlagsdatum
+    decision.numberOfSubmissions                   -> Anzahl Anbieter
+- CPV: procurement.cpvCode.code (+ procurement.additionalCpvCodes[].code)
+- Texte sind {de,en,fr,it}-Objekte -> per Sprache aufloesen.
 """
 from __future__ import annotations
 
@@ -12,105 +15,131 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 
-def _first(d: dict, *keys: str, default: Any = None) -> Any:
-    for k in keys:
-        if k in d and d[k] not in (None, "", []):
-            return d[k]
-    return default
-
-
-def _to_float(v: Any) -> float | None:
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
+def _lang(val: Any, lang: str = "de") -> str | None:
+    """Loest ein mehrsprachiges {de,en,fr,it}-Objekt auf einen String auf.
+    Faellt auf andere Sprachen zurueck, falls die gewuenschte leer ist."""
+    if val is None:
         return None
+    if isinstance(val, str):
+        return val.strip() or None
+    if isinstance(val, dict):
+        for key in (lang, "de", "fr", "it", "en"):
+            v = val.get(key)
+            if v:
+                return str(v).strip()
+    return None
 
 
 @dataclass
-class Award:
-    """Genau die Infos, die dich interessieren: Wer hat gewonnen, wann,
-    fuer wie viel, und ueber welchen Zeitraum laeuft die Beschaffung."""
+class ProjectHeader:
+    """Ein Treffer aus der Projektsuche (project-search)."""
     project_id: str | None
     publication_id: str | None
+    project_number: str | None
     title: str | None
-    canton: str | None
+    project_type: str | None        # tender, ...
+    project_sub_type: str | None    # service, construction, supply
+    process_type: str | None        # open, selective, ...
+    pub_type: str | None            # award, tender, ...
+    publication_date: str | None
     proc_office: str | None
-    award_companies: list[str]      # Zuschlagsempfaenger
-    award_date: str | None          # Zuschlagsdatum
-    award_price: float | None       # Zuschlagssumme
-    nr_of_offers: int | None
-    project_start: str | None       # Beschaffung Beginn
-    project_end: str | None         # Beschaffung Ende / fertig bis
-    submission_deadline: str | None # Eingabefrist (falls vorhanden)
-    cpv: list[str]
-    procedure: str | None
-    is_wto: bool | None
+    canton: str | None
 
     @classmethod
-    def from_raw(cls, r: dict[str, Any]) -> "Award":
-        companies = _first(r, "award_companies", "awardCompanies", "winners", default=[]) or []
-        if isinstance(companies, str):
-            companies = [companies]
-        cpv = _first(r, "cpvCodes", "cpv", "cpcCode", default=[]) or []
-        if isinstance(cpv, str):
-            cpv = [c.strip() for c in cpv.split(",") if c.strip()]
+    def from_raw(cls, r: dict[str, Any], lang: str = "de") -> "ProjectHeader":
+        addr = r.get("orderAddress") or {}
         return cls(
-            project_id=str(_first(r, "projectId", "project_id", "id", default="")) or None,
-            publication_id=str(_first(r, "publicationId", "publication_id", "id_simap", default="")) or None,
-            title=_first(r, "title", "projectTitle", "project_title"),
-            canton=_first(r, "auth_canton", "canton", "orderAddressCanton"),
-            proc_office=_first(r, "proc_office", "procOffice", "auth_activity", "procurementOffice"),
-            award_companies=[str(c) for c in companies],
-            award_date=_first(r, "award_date", "awardDate"),
-            award_price=_to_float(_first(r, "award_price", "awardPrice")),
-            nr_of_offers=_first(r, "nr_of_offers", "numberOfOffers"),
-            project_start=_first(r, "date_project_start", "dateProjectStart", "projectStart"),
-            project_end=_first(r, "date_project_end", "dateProjectEnd", "projectEnd"),
-            submission_deadline=_first(r, "datetime_deadline", "offerDeadline", "submissionDeadline"),
-            cpv=[str(c) for c in cpv],
-            procedure=_first(r, "procedure", "procedureType", "processType"),
-            is_wto=_first(r, "is_wto", "isWto", "wto"),
+            project_id=r.get("id"),
+            publication_id=r.get("publicationId"),
+            project_number=r.get("projectNumber"),
+            title=_lang(r.get("title"), lang),
+            project_type=r.get("projectType"),
+            project_sub_type=r.get("projectSubType"),
+            process_type=r.get("processType"),
+            pub_type=r.get("pubType"),
+            publication_date=r.get("publicationDate"),
+            proc_office=_lang(r.get("procOfficeName"), lang),
+            canton=addr.get("cantonId"),
         )
+
+    @property
+    def is_award(self) -> bool:
+        return (self.pub_type or "").lower().startswith("award") or \
+               (self.pub_type or "") == "direct_award"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
-class Publication:
-    """Allgemeine Publikation (Ausschreibung ODER Zuschlag) fuer breitere Analysen."""
+class Award:
+    """Vollstaendiger Zuschlag = Header + decision-Block aus der Detail-Antwort.
+    Genau das, was dich interessiert: wer, wann, wie viel, Zeitraum."""
     project_id: str | None
     publication_id: str | None
+    project_number: str | None
     title: str | None
-    pub_type: str | None
     canton: str | None
     proc_office: str | None
-    cpv: list[str]
-    date: str | None
-    award_companies: list[str]
-    award_date: str | None
-    award_price: float | None
+    award_companies: list[str]      # decision.vendors[].vendorName
+    award_price: float | None       # Summe ueber vendors[].price.price
+    award_currency: str | None
+    award_date: str | None          # decision.awardDecisionDate
+    nr_of_offers: int | None        # decision.numberOfSubmissions
+    cpv: list[str]                  # cpvCode.code + additionalCpvCodes
+    process_type: str | None
+    publication_date: str | None
+    project_start: str | None       # falls vorhanden (oft None bei Awards)
+    project_end: str | None
 
     @classmethod
-    def from_raw(cls, r: dict[str, Any]) -> "Publication":
-        companies = _first(r, "award_companies", "awardCompanies", default=[]) or []
-        if isinstance(companies, str):
-            companies = [companies]
-        cpv = _first(r, "cpvCodes", "cpv", default=[]) or []
-        if isinstance(cpv, str):
-            cpv = [c.strip() for c in cpv.split(",") if c.strip()]
+    def from_detail(cls, header: "ProjectHeader", detail: dict[str, Any],
+                    lang: str = "de") -> "Award":
+        proc = detail.get("procurement") or {}
+        decision = detail.get("decision") or {}
+        vendors = decision.get("vendors") or []
+
+        companies, total = [], 0.0
+        currency = None
+        has_price = False
+        for v in vendors:
+            name = v.get("vendorName")
+            if name:
+                companies.append(str(name))
+            p = (v.get("price") or {})
+            if p.get("price") is not None:
+                try:
+                    total += float(p["price"])
+                    has_price = True
+                    currency = currency or p.get("currency")
+                except (TypeError, ValueError):
+                    pass
+
+        cpv = []
+        cv = (proc.get("cpvCode") or {}).get("code")
+        if cv:
+            cpv.append(str(cv))
+        for ac in (proc.get("additionalCpvCodes") or []):
+            if ac.get("code"):
+                cpv.append(str(ac["code"]))
+
         return cls(
-            project_id=str(_first(r, "projectId", "project_id", default="")) or None,
-            publication_id=str(_first(r, "publicationId", "publication_id", default="")) or None,
-            title=_first(r, "title", "projectTitle"),
-            pub_type=_first(r, "pubType", "newestPubType", "publicationType", "category"),
-            canton=_first(r, "auth_canton", "canton", "orderAddressCanton"),
-            proc_office=_first(r, "proc_office", "procOffice", "procurementOffice"),
-            cpv=[str(c) for c in cpv],
-            date=_first(r, "date", "newestPublicationDate", "publicationDate"),
-            award_companies=[str(c) for c in companies],
-            award_date=_first(r, "award_date", "awardDate"),
-            award_price=_to_float(_first(r, "award_price", "awardPrice")),
+            project_id=header.project_id,
+            publication_id=header.publication_id,
+            project_number=header.project_number,
+            title=header.title or _lang(proc.get("orderDescription"), lang),
+            canton=header.canton,
+            proc_office=header.proc_office,
+            award_companies=companies,
+            award_price=total if has_price else None,
+            award_currency=(currency or "").upper() or None,
+            award_date=decision.get("awardDecisionDate"),
+            nr_of_offers=decision.get("numberOfSubmissions"),
+            cpv=cpv,
+            process_type=header.process_type,
+            publication_date=header.publication_date,
+            project_start=proc.get("dateProjectStart") or detail.get("dateProjectStart"),
+            project_end=proc.get("dateProjectEnd") or detail.get("dateProjectEnd"),
         )
 
     def to_dict(self) -> dict[str, Any]:

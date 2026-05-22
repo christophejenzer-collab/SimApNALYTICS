@@ -1,8 +1,8 @@
-"""Analyse-Funktionen auf einer Liste von Award-Objekten.
+"""Analyse-Funktionen auf einer Liste von Award-Objekten (SimApNALYTICS).
 
-Passend zum Award-Modell (echte simap-Felder). Drei Bereiche:
+Passend zum v2-Award-Modell. Drei Bereiche:
 1. Markt/Wettbewerb  -> Ranking Zuschlagsempfaenger, Wettbewerbsdichte
-2. Lead/Filter       -> nach Firma, Kanton, CPV, Zeit filtern
+2. Filter            -> nach Firma, Kanton, CPV
 3. Statistik/Trends  -> Volumen ueber Zeit, CPV-Verteilung
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ def to_frame(awards: Iterable[Award]) -> pd.DataFrame:
     df = pd.DataFrame(a.to_dict() for a in awards)
     if df.empty:
         return df
-    for col in ("award_date", "project_start", "project_end"):
+    for col in ("award_date", "project_start", "project_end", "publication_date"):
         if col in df:
             df[col] = pd.to_datetime(df[col], errors="coerce")
     return df
@@ -27,7 +27,7 @@ def to_frame(awards: Iterable[Award]) -> pd.DataFrame:
 # --- 1. Markt / Wettbewerb -----------------------------------------------
 
 def winners_ranking(df: pd.DataFrame, top: int = 20) -> pd.DataFrame:
-    """Ranking der Zuschlagsempfaenger nach Anzahl Zuschlaege und Gesamtsumme."""
+    """Ranking der Zuschlagsempfaenger nach Anzahl Zuschlaegen und Gesamtsumme."""
     if df.empty or "award_companies" not in df:
         return pd.DataFrame(columns=["Firma", "Zuschlaege", "Summe_CHF"])
     ex = df.explode("award_companies")
@@ -58,13 +58,9 @@ def competition_density(df: pd.DataFrame) -> pd.DataFrame:
 
 # --- 2. Filter ------------------------------------------------------------
 
-def filter_awards(
-    df: pd.DataFrame,
-    *,
-    company_contains: str | None = None,
-    cantons: list[str] | None = None,
-    cpv_prefixes: list[str] | None = None,
-) -> pd.DataFrame:
+def filter_awards(df: pd.DataFrame, *, company_contains: str | None = None,
+                  cantons: list[str] | None = None,
+                  cpv_prefixes: list[str] | None = None) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
@@ -72,13 +68,11 @@ def filter_awards(
         out = out[out["canton"].isin(cantons)]
     if cpv_prefixes:
         out = out[out["cpv"].apply(
-            lambda codes: any(str(c).startswith(p) for c in (codes or []) for p in cpv_prefixes)
-        )]
+            lambda codes: any(str(c).startswith(p) for c in (codes or []) for p in cpv_prefixes))]
     if company_contains:
         s = company_contains.lower()
         out = out[out["award_companies"].apply(
-            lambda lst: any(s in str(c).lower() for c in (lst or []))
-        )]
+            lambda lst: any(s in str(c).lower() for c in (lst or [])))]
     return out
 
 

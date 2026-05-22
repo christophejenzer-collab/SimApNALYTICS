@@ -145,3 +145,52 @@ class SimapClient:
     def get_project_header(self, project_id: str, lang: str = "de") -> dict[str, Any]:
         path = self.cfg.path_project_header.format(project_id=project_id)
         return self._get(path, params={"lang": lang})
+
+    # --- High-Level: Zuschlaege mit allen Details -------------------------
+
+    def find_awards(
+        self,
+        *,
+        search: str | None = None,
+        publication_from: str | None = None,
+        publication_until: str | None = None,
+        project_sub_types: list[str] | None = None,
+        cantons: list[str] | None = None,
+        cpv_codes: list[str] | None = None,
+        lang: str = "de",
+        max_results: int = 200,
+    ):
+        """Sucht Zuschlags-Publikationen und laedt fuer jede die Detaildaten
+        (Empfaenger, Datum, Summe, Anbieterzahl) nach.
+
+        Liefert fertige Award-Objekte (Generator). Filtert serverseitig auf
+        Award-Typen und client-seitig zur Sicherheit nochmal auf is_award.
+        """
+        from ..models import ProjectHeader, Award  # lokal: Vermeidet Zyklus
+
+        headers = self.search_projects(
+            search=search,
+            publication_from=publication_from,
+            publication_until=publication_until,
+            project_sub_types=project_sub_types,
+            cantons=cantons,
+            cpv_codes=cpv_codes,
+            pub_types=AWARD_PUB_TYPES,
+            lang=lang,
+        )
+        n = 0
+        for raw in headers:
+            h = ProjectHeader.from_raw(raw, lang)
+            if not h.is_award or not h.project_id or not h.publication_id:
+                continue
+            try:
+                detail = self.get_publication_details(h.project_id, h.publication_id, lang)
+            except RuntimeError:
+                continue
+            award = Award.from_detail(h, detail, lang)
+            if not award.award_companies:
+                continue
+            yield award
+            n += 1
+            if n >= max_results:
+                break
