@@ -260,15 +260,15 @@ df = st.session_state.df
 # Tabs dynamisch: Start verschwindet nach erster Suche (auch wenn leer),
 # Resultate rueckt vorn und ist automatisch aktiv.
 if st.session_state.search_performed:
-    tab_res, tab_win, tab_trend, tab_market, tab_renew = st.tabs(
+    tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender = st.tabs(
         ["📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
-         "📊 Marktanalyse", "🔁 Wiedervergabe"]
+         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen"]
     )
     tab_home = None
 else:
-    tab_home, tab_res, tab_win, tab_trend, tab_market, tab_renew = st.tabs(
+    tab_home, tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender = st.tabs(
         ["🏠 Start", "📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
-         "📊 Marktanalyse", "🔁 Wiedervergabe"]
+         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen"]
     )
 
 
@@ -556,6 +556,149 @@ with tab_renew:
                                    "simapnalytics_wiedervergabe.csv", "text/csv")
 
 
+# ----- Tab Offene Ausschreibungen --------------------------------------
+
+with tab_tender:
+    st.subheader("Offene Ausschreibungen (Tender)")
+    st.markdown(
+        "Suche nach **publizierten Ausschreibungen** (nicht Zuschlägen) — "
+        "ersetzt das simap-E-Mail-Abo. Filter sind eigenständig, "
+        "unabhängig von der Sidebar."
+    )
+
+    t1, t2 = st.columns([2, 1])
+    t_cat = t1.selectbox(
+        "CPV-Kategorie",
+        ["– keine Kategorie –"] + list(CPV_CATEGORIES.keys()),
+        index=1, key="t_cat",
+        help="Schnellauswahl. Ergänzende Codes weiter unten möglich.",
+    )
+    t_mode = t2.radio(
+        "Anzeigen", ["Nur offene", "Letzte X Tage"], index=0, key="t_mode",
+        help="*Nur offene* = Eingabefrist liegt noch in der Zukunft. "
+             "*Letzte X Tage* = alle Ausschreibungen seit X Tagen.",
+    )
+
+    t_cat_codes = codes_for(t_cat) if t_cat != "– keine Kategorie –" else []
+    t_extra = st.text_input(
+        "Zusätzliche CPV-Codes (Komma)", key="t_extra",
+        placeholder="z.B. 45211000",
+    )
+    t_extra_codes = [c.strip() for c in t_extra.split(",") if c.strip()]
+    t_cpvs = list(dict.fromkeys(t_cat_codes + t_extra_codes))
+
+    t3, t4, t5 = st.columns(3)
+    t_cantons = t3.multiselect("Kantone", CANTONS, key="t_cantons")
+    if t_mode == "Letzte X Tage":
+        t_days = t4.slider("Tage zurück", 7, 180, 30, step=7, key="t_days")
+        t_only_open = False
+    else:
+        t_days = 90
+        t4.caption("Suche umfasst Publikationen der letzten 90 Tage.")
+        t_only_open = True
+    t_max = t5.number_input(
+        "Max. Treffer", min_value=20, max_value=500, value=100, step=20,
+        key="t_max",
+    )
+
+    if t_cpvs:
+        st.caption(f"Aktive CPV-Codes: **{', '.join(t_cpvs)}**")
+    t_go = st.button(
+        "🔍 Ausschreibungen suchen", type="primary",
+        use_container_width=True, key="t_go",
+        disabled=not t_cpvs,
+    )
+
+    if not t_cpvs:
+        st.info("Wähle oben eine CPV-Kategorie oder gib eigene Codes ein.")
+    elif not t_go and "t_df" not in st.session_state:
+        st.info("Klicke **Ausschreibungen suchen**.")
+    else:
+        if t_go:
+            from_date = (date.today() - timedelta(days=t_days)).isoformat()
+            try:
+                with st.spinner("Lade Ausschreibungen mit Details…"):
+                    client = SimapClient()
+                    tenders = list(client.find_tenders(
+                        cpv_codes=t_cpvs,
+                        cantons=t_cantons or None,
+                        publication_from=from_date,
+                        only_open=t_only_open,
+                        lang="de",
+                        max_results=int(t_max),
+                    ))
+                rows = [t.to_dict() for t in tenders]
+                t_df = pd.DataFrame(rows)
+                for col in ("offer_deadline", "publication_date",
+                            "initial_publication_date",
+                            "documents_available_until",
+                            "select_participants_date",
+                            "offer_validity_until",
+                            "contract_start", "contract_end"):
+                    if col in t_df.columns:
+                        t_df[col] = pd.to_datetime(t_df[col], errors="coerce", utc=True)
+                st.session_state.t_df = t_df
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Fehler beim Abruf: {e}")
+                st.session_state.t_df = pd.DataFrame()
+
+        t_df = st.session_state.get("t_df", pd.DataFrame())
+        if t_df.empty:
+            st.warning("Keine Ausschreibungen zu diesen Filtern gefunden.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Treffer", len(t_df))
+            with_dl = int(t_df["offer_deadline"].notna().sum()) \
+                if "offer_deadline" in t_df else 0
+            c2.metric("Mit Eingabefrist", with_dl)
+            with_period = int((t_df["contract_source"] == "structured").sum()) \
+                if "contract_source" in t_df else 0
+            c3.metric("Mit Vertragslaufzeit", with_period)
+            unique_cantons = int(t_df["canton"].nunique()) \
+                if "canton" in t_df else 0
+            c4.metric("Kantone", unique_cantons)
+
+            t_sort = st.radio(
+                "Sortieren nach",
+                ["Eingabefrist (aufsteigend)",
+                 "Publikationsdatum (neueste zuerst)"],
+                index=0, horizontal=True, key="t_sort",
+            )
+            if t_sort.startswith("Eingabefrist"):
+                t_df = t_df.sort_values("offer_deadline", na_position="last")
+            else:
+                t_df = t_df.sort_values("publication_date", ascending=False,
+                                         na_position="last")
+
+            tbl = pd.DataFrame({
+                "Eingabefrist": t_df["offer_deadline"].dt.date
+                    if "offer_deadline" in t_df else None,
+                "Publikation": t_df["publication_date"].dt.date
+                    if "publication_date" in t_df else None,
+                "Titel": t_df["title"],
+                "Kanton": t_df["canton"],
+                "Stelle": t_df["proc_office"],
+                "Verfahren": t_df["process_type"],
+                "Vertragsbeginn": t_df["contract_start"].dt.date
+                    if "contract_start" in t_df else None,
+                "Vertragsende": t_df["contract_end"].dt.date
+                    if "contract_end" in t_df else None,
+                "Verlängerbar": t_df.get("can_be_extended"),
+                "Auf simap.ch öffnen": t_df["project_id"].apply(make_simap_link),
+            })
+            st.dataframe(
+                tbl, use_container_width=True, hide_index=True,
+                column_config={
+                    "Auf simap.ch öffnen": st.column_config.LinkColumn(
+                        display_text="↗ Öffnen"),
+                },
+            )
+
+            csv = tbl.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇ CSV (Offene Ausschreibungen)", csv,
+                "simapnalytics_tender.csv", "text/csv",
+            )
 
 
 if not df.empty:

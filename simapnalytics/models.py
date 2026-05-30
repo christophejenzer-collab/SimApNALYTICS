@@ -67,6 +67,123 @@ class ProjectHeader:
         return (self.pub_type or "").lower().startswith("award") or \
                (self.pub_type or "") == "direct_award"
 
+    @property
+    def is_tender(self) -> bool:
+        pt = (self.pub_type or "").lower()
+        return pt in ("tender", "tender_competition", "tender_study_contract")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Tender:
+    """Eine offene Ausschreibung mit Eingabefrist und Vertragslaufzeit.
+
+    Datumsfelder kommen aus dem Detail-Block `dates`, Vertragsdaten aus
+    `procurement.contractPeriod` (strukturiert, hart) bzw. aus dem
+    `orderDescription`-Text als Fallback.
+    """
+    project_id: str | None
+    publication_id: str | None
+    project_number: str | None
+    title: str | None
+    canton: str | None
+    proc_office: str | None
+    cpv: list[str]
+    process_type: str | None
+    pub_type: str | None
+    publication_date: str | None
+    initial_publication_date: str | None
+    offer_deadline: str | None              # dates.offerDeadline
+    documents_available_until: str | None   # dates.documentsAvailable.dateRange[1]
+    select_participants_date: str | None    # selektiv: Auswahl Teilnehmer
+    offer_validity_until: str | None        # dates.offerValidityDeadlineDate
+    # Vertragslaufzeit: bevorzugt strukturiert, sonst Text-Heuristik
+    contract_start: str | None
+    contract_end: str | None
+    contract_days: int | None
+    can_be_extended: str | None             # "yes"/"no"
+    contract_source: str                    # "structured" | "text" | "none"
+
+    @classmethod
+    def from_detail(cls, header: "ProjectHeader", detail: dict[str, Any],
+                    lang: str = "de") -> "Tender":
+        proc = detail.get("procurement") or {}
+        dates = detail.get("dates") or {}
+        info = detail.get("project-info") or {}
+
+        # Titel: Header kann None sein -> Detail nutzen
+        title = header.title or _lang(info.get("title"), lang)
+
+        # CPV
+        cpv = []
+        cv = (proc.get("cpvCode") or {}).get("code")
+        if cv:
+            cpv.append(str(cv))
+        for ac in (proc.get("additionalCpvCodes") or []):
+            if ac.get("code"):
+                cpv.append(str(ac["code"]))
+
+        # Helper fuer evtl. verschachtelte Datumsfelder
+        def _dt(obj: Any) -> str | None:
+            if not obj:
+                return None
+            if isinstance(obj, str):
+                return obj
+            if isinstance(obj, dict):
+                return obj.get("dateTime") or obj.get("date")
+            return None
+
+        docs_until = None
+        docs = dates.get("documentsAvailable") or {}
+        rng = docs.get("dateRange") or []
+        if len(rng) >= 2:
+            docs_until = rng[1]
+
+        # Vertragslaufzeit: strukturiert bevorzugt
+        contract_start = None
+        contract_end = None
+        source = "none"
+        cp = proc.get("contractPeriod") or {}
+        cp_range = cp.get("dateRange") or []
+        if len(cp_range) >= 2 and cp_range[0] and cp_range[1]:
+            contract_start = cp_range[0]
+            contract_end = cp_range[1]
+            source = "structured"
+        else:
+            # Fallback: Heuristik aus Beschreibungstext
+            from .parsing.contract_duration import parse_duration
+            base = header.publication_date
+            dur = parse_duration(_lang(proc.get("orderDescription"), lang), base)
+            if dur.estimated_end or dur.explicit_end:
+                contract_end = dur.explicit_end or dur.estimated_end
+                contract_start = base
+                source = "text"
+
+        return cls(
+            project_id=header.project_id,
+            publication_id=header.publication_id,
+            project_number=header.project_number,
+            title=title,
+            canton=header.canton,
+            proc_office=header.proc_office,
+            cpv=cpv,
+            process_type=header.process_type,
+            pub_type=header.pub_type,
+            publication_date=dates.get("publicationDate") or header.publication_date,
+            initial_publication_date=dates.get("initialPublicationDate"),
+            offer_deadline=_dt(dates.get("offerDeadline")),
+            documents_available_until=docs_until,
+            select_participants_date=_dt(dates.get("selectParticipants")),
+            offer_validity_until=dates.get("offerValidityDeadlineDate"),
+            contract_start=contract_start,
+            contract_end=contract_end,
+            contract_days=proc.get("contractDays"),
+            can_be_extended=proc.get("canContractBeExtended"),
+            contract_source=source,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

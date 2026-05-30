@@ -195,6 +195,65 @@ class SimapClient:
             if n >= max_results:
                 break
 
+    def find_tenders(
+        self,
+        *,
+        search: str | None = None,
+        publication_from: str | None = None,
+        publication_until: str | None = None,
+        project_sub_types: list[str] | None = None,
+        cantons: list[str] | None = None,
+        cpv_codes: list[str] | None = None,
+        only_open: bool = True,
+        lang: str = "de",
+        max_results: int = 200,
+    ):
+        """Sucht offene Ausschreibungen (Tender) und laedt Detaildaten nach.
+
+        Liefert Tender-Objekte (Generator).
+        only_open=True: filtert clientseitig auf Ausschreibungen, deren
+        Eingabefrist noch in der Zukunft liegt.
+        """
+        from datetime import datetime
+        from ..models import ProjectHeader, Tender
+
+        headers = self.search_projects(
+            search=search,
+            publication_from=publication_from,
+            publication_until=publication_until,
+            project_sub_types=project_sub_types,
+            cantons=cantons,
+            cpv_codes=cpv_codes,
+            pub_types=["tender"],
+            lang=lang,
+        )
+        now = datetime.now().astimezone()
+        n = 0
+        for raw in headers:
+            h = ProjectHeader.from_raw(raw, lang)
+            if not h.is_tender or not h.project_id or not h.publication_id:
+                continue
+            try:
+                detail = self.get_publication_details(h.project_id, h.publication_id, lang)
+            except RuntimeError:
+                continue
+            t = Tender.from_detail(h, detail, lang)
+            if only_open and t.offer_deadline:
+                try:
+                    dl = datetime.fromisoformat(t.offer_deadline)
+                    if dl.tzinfo is None:
+                        # Vergleich tz-naive vs tz-aware vermeiden
+                        if dl < now.replace(tzinfo=None):
+                            continue
+                    elif dl < now:
+                        continue
+                except ValueError:
+                    pass
+            yield t
+            n += 1
+            if n >= max_results:
+                break
+
     def find_awards_by_company(
         self,
         company_terms: list[str],
