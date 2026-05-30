@@ -91,6 +91,13 @@ class Award:
     publication_date: str | None
     project_start: str | None       # falls vorhanden (oft None bei Awards)
     project_end: str | None
+    # Geschaetzte Vertragslaufzeit aus Beschreibungstext (HEURISTISCH)
+    duration_main_months: int | None
+    duration_optional_months: int | None
+    duration_end_estimated: str | None       # Hauptlaufzeit -> ISO-Datum
+    duration_end_max_estimated: str | None   # + alle Optionen -> ISO-Datum
+    duration_confidence: str                 # "high"|"medium"|"low"|"none"
+    duration_source: list[str]               # Quellen-Phrasen
 
     @classmethod
     def from_detail(cls, header: "ProjectHeader", detail: dict[str, Any],
@@ -123,6 +130,13 @@ class Award:
             if ac.get("code"):
                 cpv.append(str(ac["code"]))
 
+        # Vertragslaufzeit aus Beschreibungstext schaetzen (heuristisch)
+        from .parsing.contract_duration import parse_duration
+        desc_obj = proc.get("orderDescription")
+        desc_text = _lang(desc_obj, lang)
+        award_dt = decision.get("awardDecisionDate")
+        dur = parse_duration(desc_text, award_dt)
+
         return cls(
             project_id=header.project_id,
             publication_id=header.publication_id,
@@ -133,13 +147,19 @@ class Award:
             award_companies=companies,
             award_price=total if has_price else None,
             award_currency=(currency or "").upper() or None,
-            award_date=decision.get("awardDecisionDate"),
+            award_date=award_dt,
             nr_of_offers=decision.get("numberOfSubmissions"),
             cpv=cpv,
             process_type=header.process_type,
             publication_date=header.publication_date,
             project_start=proc.get("dateProjectStart") or detail.get("dateProjectStart"),
             project_end=proc.get("dateProjectEnd") or detail.get("dateProjectEnd"),
+            duration_main_months=dur.main_months,
+            duration_optional_months=dur.optional_months,
+            duration_end_estimated=dur.explicit_end or dur.estimated_end,
+            duration_end_max_estimated=dur.estimated_end_max,
+            duration_confidence=dur.confidence,
+            duration_source=dur.source_phrases,
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -66,6 +66,11 @@ def base_table(df: pd.DataFrame) -> pd.DataFrame:
         "Währung": df["award_currency"],
         "Anbieter": df["nr_of_offers"],
         "Verfahren": df["process_type"],
+        "Laufzeit (Mt.)": df.get("duration_main_months"),
+        "Vertragsende (geschätzt)": pd.to_datetime(
+            df.get("duration_end_estimated"), errors="coerce").dt.date
+            if "duration_end_estimated" in df else None,
+        "Confidence": df.get("duration_confidence"),
         "Auf simap.ch öffnen": df["project_id"].apply(make_simap_link),
     })
 
@@ -109,11 +114,11 @@ if "last_query" not in st.session_state:
 
 
 PRESETS = {
-    "🏗 Architektur Schweiz (letzte 90 Tage)": {
+    "🏗 Architektur Schweiz (seit simap-Start)": {
         "cpv_text": "71200000, 71240000",
         "cantons": [],
         "subtypes": [],
-        "von": date.today() - timedelta(days=90),
+        "von": SIMAP_START,
         "bis": date.today(),
         "max_n": 200,
     },
@@ -198,8 +203,11 @@ with st.sidebar:
                                   format_func=lambda k: SUBTYPES[k],
                                   key="sb_subtypes")
     today = date.today()
-    sb_von = st.date_input("Publikation ab", value=today - timedelta(days=30),
-                            min_value=SIMAP_START, max_value=today, key="sb_von")
+    sb_von = st.date_input("Publikation ab", value=SIMAP_START,
+                            min_value=SIMAP_START, max_value=today, key="sb_von",
+                            help="Frühestes Datum: 01.07.2024 (simap-Start). "
+                                 "Stelle hier den gewünschten Beginn des "
+                                 "Rückblicks ein.")
     sb_bis = st.date_input("Publikation bis", value=today,
                             min_value=SIMAP_START, max_value=today, key="sb_bis")
     sb_max = st.slider("Max. Treffer", 20, 1000, 100, step=20, key="sb_max_n")
@@ -210,6 +218,8 @@ with st.sidebar:
             if k.startswith("sb_"):
                 del st.session_state[k]
         st.session_state.df = pd.DataFrame()
+        st.session_state.search_performed = False
+        st.session_state.last_query = None
         st.rerun()
 
     st.divider()
@@ -219,6 +229,9 @@ with st.sidebar:
 
 
 # ===== Suche auslösen ====================================================
+
+if "search_performed" not in st.session_state:
+    st.session_state.search_performed = False
 
 if go:
     if sb_von > sb_bis:
@@ -234,6 +247,7 @@ if go:
                 "Kantone": ", ".join(sb_cantons) or "alle",
                 "Zeitraum": f"{sb_von} bis {sb_bis}",
             }
+            st.session_state.search_performed = True
         except Exception as e:  # noqa: BLE001
             st.error(f"Fehler beim Abruf: {e}")
             st.session_state.df = pd.DataFrame()
@@ -243,34 +257,47 @@ df = st.session_state.df
 
 # ===== Tabs ==============================================================
 
-tab_home, tab_res, tab_win, tab_trend, tab_market = st.tabs(
-    ["🏠 Start", "📋 Resultate", "🏆 Wer gewinnt", "📈 Trends", "📊 Marktanalyse"]
-)
+# Tabs dynamisch: Start verschwindet nach erster Suche (auch wenn leer),
+# Resultate rueckt vorn und ist automatisch aktiv.
+if st.session_state.search_performed:
+    tab_res, tab_win, tab_trend, tab_market, tab_renew = st.tabs(
+        ["📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
+         "📊 Marktanalyse", "🔁 Wiedervergabe"]
+    )
+    tab_home = None
+else:
+    tab_home, tab_res, tab_win, tab_trend, tab_market, tab_renew = st.tabs(
+        ["🏠 Start", "📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
+         "📊 Marktanalyse", "🔁 Wiedervergabe"]
+    )
 
 
 # ----- Tab Start (Welcome + Beispielsuchen) -----------------------------
+# Nur wenn noch keine Suche gemacht wurde, ist tab_home vorhanden.
 
-with tab_home:
-    st.subheader("Willkommen")
-    st.markdown(
-        "**SimApNALYTICS** liest öffentlich publizierte Zuschläge von "
-        "simap.ch und macht sie auswertbar:\n\n"
-        "- **Resultate** — alle gefundenen Zuschläge mit Empfänger, Datum, Summe, "
-        "Link zur Original-Publikation\n"
-        "- **Wer gewinnt** — Ranking der erfolgreichen Firmen plus Wettbewerbsdichte\n"
-        "- **Trends** — Volumen über Zeit, CPV-Verteilung\n"
-        "- **Marktanalyse** — Marktanteile und Rangliste für eine ganze CPV-Domain"
-    )
-    st.markdown("##### Schnellstart – Klick auf eine Beispielsuche")
-    cols = st.columns(2)
-    for i, name in enumerate(PRESETS):
-        with cols[i % 2]:
-            if st.button(name, use_container_width=True, key=f"preset_{i}"):
-                apply_preset(name)
-                st.toast(f"Filter gesetzt: {name}. Klicke jetzt links auf **Suchen**.")
-                st.rerun()
-    st.divider()
-    st.caption("Oder stelle die Filter links manuell ein und klicke **Suchen**.")
+if tab_home is not None:
+    with tab_home:
+        st.subheader("Willkommen")
+        st.markdown(
+            "**SimApNALYTICS** liest öffentlich publizierte Zuschläge von "
+            "simap.ch und macht sie auswertbar:\n\n"
+            "- **Resultate** — alle gefundenen Zuschläge mit Empfänger, Datum, Summe, "
+            "Link zur Original-Publikation\n"
+            "- **Wer gewinnt** — Ranking der erfolgreichen Firmen plus Wettbewerbsdichte\n"
+            "- **Trends** — Volumen über Zeit, CPV-Verteilung\n"
+            "- **Marktanalyse** — Marktanteile und Rangliste für eine ganze CPV-Domain\n"
+            "- **Wiedervergabe** — anstehende Vertragsenden (heuristisch geschätzt)"
+        )
+        st.markdown("##### Schnellstart – Klick auf eine Beispielsuche")
+        cols = st.columns(2)
+        for i, name in enumerate(PRESETS):
+            with cols[i % 2]:
+                if st.button(name, use_container_width=True, key=f"preset_{i}"):
+                    apply_preset(name)
+                    st.toast(f"Filter gesetzt: {name}. Klicke jetzt links auf **Suchen**.")
+                    st.rerun()
+        st.divider()
+        st.caption("Oder stelle die Filter links manuell ein und klicke **Suchen**.")
 
 
 # ----- Tab Resultate ----------------------------------------------------
@@ -419,7 +446,117 @@ with tab_market:
             c_right.bar_chart(agg.set_index("Periode")["Summe_CHF"])
 
 
-# ===== Globaler Export (alles als Excel, am Ende der Seite) ============
+# ----- Tab Wiedervergabe ------------------------------------------------
+
+with tab_renew:
+    st.subheader("Wiedervergabe-Radar")
+    st.markdown(
+        "Zeigt Aufträge der aktuellen Suche, deren **geschätztes Vertragsende** "
+        "in einem wählbaren Zukunftsfenster liegt — also Aufträge, die "
+        "voraussichtlich bald neu ausgeschrieben werden."
+    )
+    st.warning(
+        "**Wichtig — Schätzung, nicht Garantie.** simap stellt keine "
+        "strukturierten Laufzeitfelder bereit. Die Laufzeit wird heuristisch "
+        "aus dem Beschreibungstext geparst (z. B. *Laufzeit 5 Jahre*). "
+        "Treffer haben eine Confidence (high/medium/low). Aufträge ohne "
+        "erkennbare Laufzeit (Bauarbeiten, einmalige Lieferungen) erscheinen "
+        "**nicht** in dieser Liste."
+    )
+
+    if df.empty:
+        st.info("Bitte erst links Filter setzen und **Suchen** klicken.")
+    elif "duration_end_estimated" not in df.columns:
+        st.warning("Keine Vertragslaufzeit-Daten verfügbar – ggf. Daten neu laden.")
+    else:
+        # Filter
+        f_col1, f_col2, f_col3 = st.columns([1, 1, 1])
+        horizon_months = f_col1.slider(
+            "Vorausschau (Monate ab heute)", 6, 60, 24, step=6,
+            help="Welche Vertragsenden im nächsten Zeitraum interessieren dich?",
+            key="renew_horizon",
+        )
+        include_max = f_col2.checkbox(
+            "Auch Optionen ausgeschöpft betrachten",
+            value=False,
+            help="Statt regulärem Ende das Maximum (mit allen Optionen) nutzen.",
+            key="renew_max",
+        )
+        min_conf = f_col3.selectbox(
+            "Mindest-Confidence", ["high", "medium", "low"], index=1,
+            help="Filtert unsichere Schätzungen heraus.",
+            key="renew_conf",
+        )
+
+        # Confidence-Hierarchie
+        conf_rank = {"high": 3, "medium": 2, "low": 1, "none": 0}
+        threshold = conf_rank[min_conf]
+
+        # Datenbasis: nur Awards mit Vertragsende-Schätzung
+        end_col = "duration_end_max_estimated" if include_max \
+            else "duration_end_estimated"
+        renew_df = df[df[end_col].notna() &
+                      df["duration_confidence"].map(conf_rank).ge(threshold)].copy()
+        if renew_df.empty:
+            st.info("Keine Aufträge mit Laufzeit-Schätzung in der aktuellen "
+                    "Suche. Versuche eine andere Domain (z. B. IT, MPS, "
+                    "Wartung) — bei Bauaufträgen gibt es typischerweise keine "
+                    "Laufzeit-Angabe.")
+        else:
+            renew_df["_end"] = pd.to_datetime(renew_df[end_col], errors="coerce")
+            today = pd.Timestamp(date.today())
+            horizon_end = today + pd.DateOffset(months=horizon_months)
+            in_window = renew_df[
+                (renew_df["_end"] >= today) & (renew_df["_end"] <= horizon_end)
+            ].sort_values("_end")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Mit Laufzeit", len(renew_df))
+            c2.metric(f"Ablauf in {horizon_months} Mt.", len(in_window))
+            c3.metric("Total CHF (Fenster)",
+                      f"{in_window['award_price'].sum(skipna=True):,.0f}")
+
+            if in_window.empty:
+                st.success("Keine Verträge in diesem Fenster auslaufend.")
+            else:
+                st.subheader("Anstehende Wiedervergaben")
+                tbl = pd.DataFrame({
+                    "Vertragsende (geschätzt)": in_window["_end"].dt.date,
+                    "Titel": in_window["title"],
+                    "Aktueller Empfänger": in_window["award_companies"].apply(
+                        lambda x: ", ".join(x)),
+                    "Stelle": in_window["proc_office"],
+                    "Kanton": in_window["canton"],
+                    "Original-Summe (CHF)": in_window["award_price"],
+                    "Laufzeit (Mt.)": in_window["duration_main_months"],
+                    "Confidence": in_window["duration_confidence"],
+                    "Auf simap.ch öffnen": in_window["project_id"].apply(make_simap_link),
+                })
+                st.dataframe(tbl, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Auf simap.ch öffnen": st.column_config.LinkColumn(
+                                     display_text="↗ Öffnen"),
+                                 "Original-Summe (CHF)": st.column_config.NumberColumn(
+                                     format="%.2f"),
+                             })
+
+                with st.expander("Wie wurde die Laufzeit erkannt?"):
+                    detail = in_window[["title", "duration_source",
+                                        "duration_confidence",
+                                        "duration_main_months",
+                                        "duration_optional_months"]].copy()
+                    detail.columns = ["Titel", "Erkannte Phrasen", "Confidence",
+                                      "Haupt (Mt.)", "Optionen (Mt.)"]
+                    detail["Erkannte Phrasen"] = detail["Erkannte Phrasen"].apply(
+                        lambda lst: " · ".join(lst) if isinstance(lst, list) else "")
+                    st.dataframe(detail, use_container_width=True, hide_index=True)
+
+                csv = tbl.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("⬇ CSV (Wiedervergabe)", csv,
+                                   "simapnalytics_wiedervergabe.csv", "text/csv")
+
+
+
 
 if not df.empty:
     st.divider()
