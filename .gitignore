@@ -24,3 +24,13 @@ simap_cache.db
 .idea/
 .vscode/
 *.swp
+
+# Debug- und Test-Outputs
+detail.json
+samples.json
+*.json
+
+# Debug- und Test-Outputs (nicht ins Repo)
+detail.json
+samples.json
+debug_*.json
