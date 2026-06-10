@@ -254,6 +254,94 @@ class SimapClient:
             if n >= max_results:
                 break
 
+    def find_awards_filtered(
+        self,
+        *,
+        company_terms: list[str] | None = None,
+        office_terms: list[str] | None = None,
+        cpv_codes: list[str] | None = None,
+        search: str | None = None,
+        publication_from: str | None = None,
+        publication_until: str | None = None,
+        cantons: list[str] | None = None,
+        project_sub_types: list[str] | None = None,
+        lang: str = "de",
+        scan_limit: int = 3000,
+        progress_callback=None,
+    ):
+        """Findet Zuschlaege gefiltert nach Empfaenger UND/ODER Vergeber.
+
+        Optimierung: Vergeber-Filter laeuft auf Header (kein Detail-Call noetig).
+        Empfaenger-Filter braucht Detail. Wenn beides gesetzt: erst Vergeber
+        filtern, dann Detail laden, dann Empfaenger pruefen -> minimiert
+        API-Calls drastisch.
+
+        Match jeweils per Teilstring (case-insensitiv).
+        scan_limit: max. gescannte Header (Schutz vor Endlos-Last).
+        progress_callback(scanned, hits): optionaler Fortschritts-Hook,
+        wird nach jedem gescannten Header aufgerufen.
+        """
+        from ..models import ProjectHeader, Award
+
+        company_low = [t.lower() for t in (company_terms or []) if t.strip()]
+        office_low = [t.lower() for t in (office_terms or []) if t.strip()]
+        if not company_low and not office_low:
+            raise ValueError("Mindestens company_terms ODER office_terms angeben.")
+
+        headers = self.search_projects(
+            search=search,
+            publication_from=publication_from,
+            publication_until=publication_until,
+            project_sub_types=project_sub_types,
+            cantons=cantons,
+            cpv_codes=cpv_codes,
+            pub_types=AWARD_PUB_TYPES,
+            lang=lang,
+        )
+
+        scanned = 0
+        hits = 0
+        for raw in headers:
+            scanned += 1
+            if scanned > scan_limit:
+                break
+            h = ProjectHeader.from_raw(raw, lang)
+            if not h.is_award or not h.project_id or not h.publication_id:
+                if progress_callback:
+                    progress_callback(scanned, hits)
+                continue
+            # Vergeber-Filter direkt auf Header (schnell)
+            if office_low:
+                office_text = (h.proc_office or "").lower()
+                if not any(t in office_text for t in office_low):
+                    if progress_callback:
+                        progress_callback(scanned, hits)
+                    continue
+            # Detail nur wenn Header-Filter passt
+            try:
+                detail = self.get_publication_details(
+                    h.project_id, h.publication_id, lang)
+            except RuntimeError:
+                if progress_callback:
+                    progress_callback(scanned, hits)
+                continue
+            award = Award.from_detail(h, detail, lang)
+            if not award.award_companies:
+                if progress_callback:
+                    progress_callback(scanned, hits)
+                continue
+            # Empfaenger-Filter auf Detail
+            if company_low:
+                hay = " ".join(award.award_companies).lower()
+                if not any(t in hay for t in company_low):
+                    if progress_callback:
+                        progress_callback(scanned, hits)
+                    continue
+            hits += 1
+            if progress_callback:
+                progress_callback(scanned, hits)
+            yield award
+
     def find_awards_by_company(
         self,
         company_terms: list[str],

@@ -260,15 +260,17 @@ df = st.session_state.df
 # Tabs dynamisch: Start verschwindet nach erster Suche (auch wenn leer),
 # Resultate rueckt vorn und ist automatisch aktiv.
 if st.session_state.search_performed:
-    tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender = st.tabs(
+    tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender, tab_partners = st.tabs(
         ["📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
-         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen"]
+         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen",
+         "🤝 Anbieter & Vergeber"]
     )
     tab_home = None
 else:
-    tab_home, tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender = st.tabs(
+    tab_home, tab_res, tab_win, tab_trend, tab_market, tab_renew, tab_tender, tab_partners = st.tabs(
         ["🏠 Start", "📋 Resultate", "🏆 Wer gewinnt", "📈 Trends",
-         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen"]
+         "📊 Marktanalyse", "🔁 Wiedervergabe", "📢 Offene Ausschreibungen",
+         "🤝 Anbieter & Vergeber"]
     )
 
 
@@ -698,6 +700,224 @@ with tab_tender:
             st.download_button(
                 "⬇ CSV (Offene Ausschreibungen)", csv,
                 "simapnalytics_tender.csv", "text/csv",
+            )
+
+
+# ----- Tab Anbieter & Vergeber ------------------------------------------
+
+with tab_partners:
+    st.subheader("Anbieter & Vergeber")
+    st.markdown(
+        "Suche nach Zuschlägen gefiltert über **Empfänger** (Firma, die "
+        "gewonnen hat), **Vergeber** (Beschaffungsstelle) oder beidem. "
+        "Bei kombinierter Suche: Wer hat von wem wann was bekommen.\n\n"
+        "Diese Suche ist eigenständig — sie nutzt nicht die Sidebar-Filter."
+    )
+
+    p1, p2 = st.columns(2)
+    p_company = p1.text_input(
+        "Empfänger enthält…",
+        placeholder="z.B. Ricoh",
+        key="p_company",
+        help="Teilstring im Firmennamen, case-insensitiv.",
+    )
+    p_office = p2.text_input(
+        "Vergeber (Beschaffungsstelle) enthält…",
+        placeholder="z.B. Bundesamt für Bauten",
+        key="p_office",
+        help="Teilstring im Namen der Beschaffungsstelle.",
+    )
+
+    # CPV-Vorfilter (Pflicht, wenn nur Empfaenger gesucht wird)
+    st.markdown("**CPV-Vorfilter** (verkürzt Suche drastisch)")
+    pc1, pc2 = st.columns([2, 3])
+    p_cat = pc1.selectbox(
+        "Kategorie",
+        ["– keine Kategorie –"] + list(CPV_CATEGORIES.keys()),
+        index=0, key="p_cat",
+        help="simap kann nicht nach Empfängernamen filtern. Mit CPV-Vorfilter "
+             "lädt das Tool nur Zuschläge dieser Domain — Faktor 20-50 "
+             "schneller bei Empfänger-Suche.",
+    )
+    p_cat_codes = codes_for(p_cat) if p_cat != "– keine Kategorie –" else []
+    p_extra = pc2.text_input(
+        "Zusätzliche CPV-Codes (Komma)", key="p_extra",
+        placeholder="z.B. 30232100, 30120000",
+    )
+    p_extra_codes = [c.strip() for c in p_extra.split(",") if c.strip()]
+    p_cpvs = list(dict.fromkeys(p_cat_codes + p_extra_codes))
+
+    p3, p4, p5 = st.columns([1, 1, 1])
+    p_von = p3.date_input("Publikation ab", value=SIMAP_START,
+                          min_value=SIMAP_START, max_value=today, key="p_von")
+    p_bis = p4.date_input("Publikation bis", value=today,
+                          min_value=SIMAP_START, max_value=today, key="p_bis")
+    p_scan = p5.number_input(
+        "Scan-Limit",
+        min_value=200, max_value=5000, value=1000, step=200,
+        key="p_scan",
+        help="Max. zu durchsuchende Zuschläge. Höher = vollständiger, langsamer.",
+    )
+
+    if p_cpvs:
+        st.caption(f"Aktive CPV-Codes: **{', '.join(p_cpvs)}**")
+
+    has_company = bool(p_company.strip())
+    has_office = bool(p_office.strip())
+    has_input = has_company or has_office
+    # CPV nötig wenn nur Empfänger gesetzt ist (sonst extrem langsam)
+    needs_cpv = has_company and not has_office
+    cpv_ok = bool(p_cpvs) or not needs_cpv
+
+    if needs_cpv and not p_cpvs:
+        st.warning(
+            "**CPV-Vorfilter erforderlich** wenn nur ein Empfänger gesucht wird. "
+            "simap kann nicht serverseitig nach Empfänger filtern — ohne CPV "
+            "müsste das Tool jeden einzelnen Zuschlag im Zeitraum prüfen "
+            "(Stunden). Wähle eine CPV-Kategorie oder gib Codes ein."
+        )
+
+    p_go = st.button(
+        "🔍 Suchen", type="primary", use_container_width=True,
+        key="p_go", disabled=not (has_input and cpv_ok),
+    )
+
+    if not has_input:
+        st.info("Gib mindestens einen Empfänger ODER Vergeber ein.")
+    else:
+        if p_go:
+            if p_von > p_bis:
+                st.error("'Publikation ab' liegt nach 'Publikation bis'.")
+                st.stop()
+
+            # Fortschrittsanzeige
+            progress_bar = st.progress(0.0, text="Initialisiere…")
+            status_text = st.empty()
+
+            def update_progress(scanned: int, hits: int) -> None:
+                pct = min(scanned / int(p_scan), 1.0)
+                progress_bar.progress(
+                    pct, text=f"{scanned} von {p_scan} gescannt · {hits} Treffer"
+                )
+
+            try:
+                client = SimapClient()
+                awards = list(client.find_awards_filtered(
+                    company_terms=[p_company.strip()] if has_company else None,
+                    office_terms=[p_office.strip()] if has_office else None,
+                    cpv_codes=p_cpvs or None,
+                    publication_from=p_von.isoformat(),
+                    publication_until=p_bis.isoformat(),
+                    lang="de",
+                    scan_limit=int(p_scan),
+                    progress_callback=update_progress,
+                ))
+                progress_bar.empty()
+                status_text.success(f"Fertig: {len(awards)} Treffer.")
+                st.session_state.p_df = az.to_frame(awards)
+            except Exception as e:  # noqa: BLE001
+                progress_bar.empty()
+                st.error(f"Fehler beim Abruf: {e}")
+                st.session_state.p_df = pd.DataFrame()
+
+        p_df = st.session_state.get("p_df", pd.DataFrame())
+        if p_df.empty:
+            if p_go:
+                st.warning(
+                    "Keine Treffer. Mögliche Gründe: kein Zuschlag mit diesen "
+                    "Filtern im Zeitraum, Scan-Limit zu tief, oder Schreibweise "
+                    "des Namens weicht ab (probier kürzeren Teilstring)."
+                )
+        else:
+            # KPIs
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Zuschläge", len(p_df))
+            c2.metric("Total CHF",
+                      f"{p_df['award_price'].sum(skipna=True):,.0f}")
+            offices = p_df["proc_office"].nunique() if "proc_office" in p_df else 0
+            c3.metric("Vergeber (unique)", int(offices))
+            firms = p_df.explode("award_companies")["award_companies"]
+            firms = firms[firms.notna() & (firms != "")]
+            c4.metric("Empfänger (unique)", firms.nunique())
+
+            # Tabelle
+            st.subheader("Aufträge")
+            tbl = pd.DataFrame({
+                "Datum": p_df["award_date"].dt.date if "award_date" in p_df else None,
+                "Titel": p_df["title"],
+                "Empfänger": p_df["award_companies"].apply(lambda x: ", ".join(x)),
+                "Vergeber": p_df["proc_office"],
+                "Kanton": p_df["canton"],
+                "Summe (CHF)": p_df["award_price"],
+                "Anbieter": p_df["nr_of_offers"],
+                "Verfahren": p_df["process_type"],
+                "Auf simap.ch öffnen": p_df["project_id"].apply(make_simap_link),
+            }).sort_values("Datum", ascending=False)
+            st.dataframe(
+                tbl, use_container_width=True, hide_index=True,
+                column_config={
+                    "Auf simap.ch öffnen": st.column_config.LinkColumn(
+                        display_text="↗ Öffnen"),
+                    "Summe (CHF)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+
+            # Zeitreihe
+            st.subheader("Zuschlagsvolumen über Zeit (Quartal)")
+            ts = p_df.dropna(subset=["award_date"]).copy()
+            if not ts.empty:
+                ts["Periode"] = ts["award_date"].dt.to_period("Q").dt.to_timestamp()
+                agg = ts.groupby("Periode").agg(
+                    Anzahl=("award_date", "size"),
+                    Summe_CHF=("award_price", "sum"),
+                ).reset_index()
+                ts_left, ts_right = st.columns(2)
+                ts_left.caption("Anzahl Zuschläge pro Quartal")
+                ts_left.bar_chart(agg.set_index("Periode")["Anzahl"])
+                ts_right.caption("Volumen pro Quartal (CHF)")
+                ts_right.bar_chart(agg.set_index("Periode")["Summe_CHF"])
+
+            # Beziehung: je nach Filter unterschiedliche Aggregate
+            if has_company and has_office:
+                st.subheader("Empfänger–Vergeber-Matrix")
+                ex = p_df.explode("award_companies").copy()
+                ex = ex[ex["award_companies"].notna() & (ex["award_companies"] != "")]
+                cross = ex.groupby(["award_companies", "proc_office"]).agg(
+                    Zuschlaege=("project_id", "count"),
+                    Summe_CHF=("award_price", "sum"),
+                ).reset_index().sort_values("Summe_CHF", ascending=False)
+                cross.columns = ["Empfänger", "Vergeber", "Zuschläge", "Summe_CHF"]
+                st.dataframe(cross, use_container_width=True, hide_index=True)
+            elif has_company:
+                st.subheader("Top-Vergeber für diese(n) Empfänger")
+                st.caption("Bei welchen Beschaffungsstellen war der Empfänger erfolgreich.")
+                off_agg = p_df.groupby("proc_office").agg(
+                    Zuschlaege=("project_id", "count"),
+                    Summe_CHF=("award_price", "sum"),
+                ).reset_index().sort_values("Summe_CHF", ascending=False).head(20)
+                off_agg.columns = ["Vergeber", "Zuschläge", "Summe_CHF"]
+                st.dataframe(off_agg, use_container_width=True, hide_index=True)
+                if not off_agg.empty:
+                    st.bar_chart(off_agg.set_index("Vergeber")["Summe_CHF"].head(15))
+            elif has_office:
+                st.subheader("Top-Empfänger dieses Vergebers")
+                st.caption("Welche Firmen erhalten am meisten von dieser Stelle.")
+                ex = p_df.explode("award_companies").copy()
+                ex = ex[ex["award_companies"].notna() & (ex["award_companies"] != "")]
+                firm_agg = ex.groupby("award_companies").agg(
+                    Zuschlaege=("project_id", "count"),
+                    Summe_CHF=("award_price", "sum"),
+                ).reset_index().sort_values("Summe_CHF", ascending=False).head(20)
+                firm_agg.columns = ["Empfänger", "Zuschläge", "Summe_CHF"]
+                st.dataframe(firm_agg, use_container_width=True, hide_index=True)
+                if not firm_agg.empty:
+                    st.bar_chart(firm_agg.set_index("Empfänger")["Summe_CHF"].head(15))
+
+            # CSV-Export
+            csv = tbl.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇ CSV (Anbieter & Vergeber)", csv,
+                "simapnalytics_partners.csv", "text/csv",
             )
 
 
